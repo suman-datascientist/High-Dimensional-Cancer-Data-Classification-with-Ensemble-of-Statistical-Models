@@ -1,0 +1,452 @@
+---
+title: "Data Mining Project - Arcene"
+author: "Suman Gorkhali"
+date: "2026-03-30"
+output: html_document
+---
+
+
+```{r library}
+library(foreign)
+library(randomForest)
+library(RRF)
+library(tree)
+library(glmnet)
+library(MASS)
+
+set.seed(20551088)
+```
+
+```{r arceneData}
+arcene = read.arff("arcene_data.arff")
+arcene$Class = ifelse(arcene$Class == 2, 0, 1)
+arcene$Class = as.factor(arcene$Class)
+
+train_idx = as.integer(x = sample(nrow(arcene), size = 0.8 * nrow(arcene)))
+
+# dataset to store model stat
+model_stat = data.frame(
+                        model = character(),
+                        Sensitivity = numeric(),
+                        Specificity = numeric(),
+                        Error = numeric(),
+                        stringsAsFactors = FALSE
+                        )
+
+```
+
+```{r testAccuracyFunction}
+testAccuracy <- function(prediction, k){
+  truth_table = table(Prediction = prediction, Actual = arcene[-train_idx, "Class"])
+  print(truth_table)
+  
+  TP = truth_table["1","1"]
+  TN = truth_table["0","0"]
+  FP = truth_table["1","0"]
+  FN = truth_table["0","1"]
+  
+  sensitivity = TP/ (TP + FN)
+  
+  specificity = TN/(TN + FP)
+
+  error = (FP + FN)/(FP + FN + TP + TN)
+  
+  # store in the model_stat data frame
+  rowNum = (dim(model_stat)[1] + 1)
+  
+  model_stat[rowNum, "model"] <<- k
+  model_stat[rowNum, "Sensitivity"] <<- sensitivity
+  model_stat[rowNum, "Specificity"] <<- specificity
+  model_stat[rowNum, "Error"] <<- error
+  
+  return(c(sensitivity = paste(k,' :', round(sensitivity,2)), 
+           specificity = paste(k, ': ', round(specificity,2)), 
+           error = paste(k, ': ', round(error,2))
+           )
+         )
+}
+
+```
+
+
+# ```{r lasso}
+# set.seed(20551088)
+# 
+# x = model.matrix(Class ~ ., data = arcene)[, -1]
+# y = arcene$Class 
+# 
+# fitLasso = cv.glmnet(x[train_idx, ], y[train_idx], alpha = 1, family = "binomial")
+# 
+# reducedDim = coef(fitLasso, s = 'lambda.min')
+# reducedDim = data.frame(as.matrix(reducedDim))
+# index = which(reducedDim$lambda.min != 0)
+# lasso_Dimension = rownames(reducedDim)[index]
+# lasso_Dimension
+# length(lasso_Dimension)
+# 
+# predLasso_prob = predict(fitLasso, newx = x[-train_idx, ], s = "lambda.min", type = "response")
+# predLasso = ifelse(predLasso_prob > 0.5, 1, 0)
+# 
+# plot(fitLasso)
+# 
+# lassoTestAccuracy = testAccuracy(predLasso, 'lasso') 
+# lassoTestAccuracy
+# 
+# ```
+
+```{r pca}
+#PCA + Logistic Regression
+set.seed(20551088)
+
+#  predictor matrix and response
+x <- model.matrix(Class ~ ., data = arcene)[, -1]
+y <- arcene$Class
+
+
+x.train <- x[train_idx, ]
+y.train  <-y[train_idx]
+
+x.valid <- x[-train_idx, ]
+y.valid <- y[-train_idx]
+
+
+nzv <- apply(x.train, 2, sd) != 0
+x.train <- x.train[, nzv]
+x.valid <- x.valid[, nzv]
+
+
+
+# PCA
+pca <- prcomp(x.train, scale = TRUE)
+
+# loadings
+pca$rotation[1:50, 1:4]
+
+# scores
+head(pca$x)
+pca$x[1:2, 1:2]
+
+# variance explained
+summary(pca)
+sum(pca$sdev^2)
+str(summary(pca))
+summary(pca)$importance[3, ]   # cumulative proportion
+summary(pca)$importance[2, ]   # proportion explained
+
+# biplot
+biplot(pca, scale = 0)
+
+# scree plot
+plot(pca)
+
+# proportion variance explained for first 10 PCs
+plot(1:20, summary(pca)$importance[2, 1:20],
+     type = "l",
+     xlab = "Prin Comps",
+     ylab = "Proportion Variance Explained",
+     main = "Variance Explained by First 10 PCs")
+
+# cumulative variance explained for first 10 PCs
+plot(1:20, summary(pca)$importance[3, 1:20],
+     type = "l",
+     xlab = "Prin Comps",
+     ylab = "Cumulative Proportion",
+     main = "Cumulative Variance Explained")
+
+# PCA scores plot
+plot(pca$x[,1], pca$x[,2],
+     col = as.numeric(y.train),
+     pch = 19,
+     xlab = "PC1",
+     ylab = "PC2",
+     main = "PCA Scores Plot")
+
+legend("topright",
+       legend = levels(y.train),
+       col = 1:length(levels(y.train)),
+       pch = 19)
+
+# choose number of PCs K= 20
+
+
+# training PC scores
+train.pcs <- as.data.frame(pca$x[, 1:20])
+train.pcs$Class <- y.train
+
+# validation PC scores
+valid.scores <- predict(pca, newdata = x.valid)
+valid.pcs <- as.data.frame(valid.scores[, 1:20])
+valid.pcs$Class <- y.valid
+```
+
+```{r pcaTHENglm}
+set.seed(20551088)
+fit.log <- glm(Class ~ ., data = train.pcs, family = binomial)
+
+summary(fit.log)
+
+# prediction
+pred.log.prob <- predict(fit.log, newdata = valid.pcs, type = "response")
+pred.log  <- ifelse(pred.log.prob > 0.5, 1, 0)
+pred.log  <-as.factor(pred.log)
+
+# results
+table(pred.log, y.valid)
+
+pcaLogTestAccuracy <- testAccuracy(pred.log, "pca + fit.log")
+pcaLogTestAccuracy
+```
+
+
+
+# ```{r cvtree}
+# set.seed(20551088)
+# fitTree = tree(as.factor(Class) ~., data = arcene, subset = train_idx)
+# #plot(fitTree, cex = 0.01)
+# 
+# cvTree = cv.tree(fitTree)
+# plot(cvTree$size, cvTree$dev)
+# 
+# prunedTree = prune.tree(fitTree, best = 3, method = 'deviance')
+# plot(prunedTree)
+# text(prunedTree, cex = 0.5)
+# 
+# predPrunedTree = predict(prunedTree, arcene[-train_idx,], type = 'class')
+# summary(prunedTree)
+# 
+# treeTestAccuracy = testAccuracy(predPrunedTree, 'prunedTree')
+# treeTestAccuracy
+# 
+# 
+# ```
+
+
+```{r Bagging}
+set.seed(20551088)
+fitBag = randomForest(Class ~., data = arcene, subset = train_idx, mtry = 10000)
+predBag = predict(fitBag, arcene[-train_idx,])
+
+truth_table = table(Prediction = predBag, Actual = arcene[-train_idx, "Class"])
+
+plot(fitBag)
+
+baggingTestAccuracy = testAccuracy(predBag, 'Bagging')
+baggingTestAccuracy
+
+
+```
+
+
+```{r VariableImportance}
+set.seed(20551088)
+fitVI = randomForest(Class ~., data = arcene, subset = train_idx,
+                     importance = TRUE, ntree = 400)
+plot(fitVI, main = 'Random Forest with Variable Importance')
+#randomForest::importance(fitVI)
+randomForest::varImpPlot(fitVI, main = 'Random Forest with Variable Importance')
+
+predVI = predict(fitVI, arcene[-train_idx,])
+
+baggingTestAccuracy = testAccuracy(predVI, 'randomForest Variable Importance')
+baggingTestAccuracy
+
+```
+
+
+
+
+```{r GRRF}
+set.seed(1)
+# Guided Regularized Random Forest
+fit_rrf = RRF(arcene[train_idx, -10001], arcene[train_idx, 10001], flagReg = 0, ntree = 500)
+importance = fit_rrf$importance[,1]
+
+# Hyperparameter
+gamma = 0.75
+
+# Guided RRF coefficients
+coefGRRF = (1 - gamma) + gamma * (importance/(max(importance)))
+
+# Guided Regularized Random Forest
+fit_guided_rrf = RRF(arcene[train_idx, -10001], arcene[train_idx, 10001], flagReg = 1, coefReg = coefGRRF)
+
+# Selected Features
+selectedFeatures = fit_guided_rrf$feaSet
+length(selectedFeatures)
+
+# Prediction
+predGRRF = predict(fit_guided_rrf, arcene[-train_idx,])
+
+GRRFtestAccuracy = testAccuracy(predGRRF, 'GRRF')
+GRRFtestAccuracy
+
+
+
+```
+
+```{r GRRFmultipleGamma}
+# Try multiple gamma values
+# gamma_values = c(0, 0.25, 0.5, 0.75, 1)
+# 
+# results = data.frame()
+# 
+# for(g in gamma_values){
+#   coefGRRF = (1 - g) + g * (importance/(max(importance)))
+#   
+#   fit_temp = RRF(arcene[train_idx, -10001],
+#                  arcene[train_idx, 10001],
+#                  flagReg = 1,
+#                  coefReg = coefGRRF)
+#   
+#   pred = predict(fit_temp, arcene[-train_idx,])
+#   
+#   acc = testAccuracy(pred, paste("GRRF_gamma_", g))
+# }
+```
+
+## LDA
+
+LDA assumes both classes share the same covariance matrix and finds
+the linear combination that best separates them. After PCA reduction to
+130 components, the covariance matrix is invertible and we can fit the
+model.
+
+
+
+```{r LDA}
+set.seed(20551088)
+
+train.x <- arcene[train_idx, -ncol(arcene)]
+test.x <- arcene[-train_idx, -ncol(arcene)]
+train.y <- arcene$Class[train_idx]
+test.y <- arcene$Class[-train_idx]
+
+# remove zero-variance columns
+keep <- apply(train.x, 2, sd) > 0
+train.x <- train.x[, keep]
+test.x <- test.x[, keep]
+cat("Removed", sum(!keep), "zero-variance columns,", sum(keep), "remaining\n")
+
+pca.fit <- prcomp(train.x, scale. = TRUE)
+
+# how many components for different variance thresholds
+cum.var <- cumsum(pca.fit$sdev^2) / sum(pca.fit$sdev^2)
+cat("Components for 80% variance:", which(cum.var >= 0.80)[1], "\n")
+
+cat("Components for 90% variance:", which(cum.var >= 0.90)[1], "\n")
+
+cat("Components for 95% variance:", which(cum.var >= 0.95)[1], "\n")
+
+cat("Components for 99.99% variance:", which(cum.var >= 0.9999)[1], "\n")
+
+
+ncomp.95 <- which(cum.var >= 0.95)[1]
+
+train.pca <- data.frame(pca.fit$x[, 1:ncomp.95], Class = train.y)
+test.pca <- data.frame(predict(pca.fit, test.x)[, 1:ncomp.95])
+
+fit.lda <- lda(Class ~ ., data = train.pca)
+
+pred.lda <- predict(fit.lda, test.pca)
+lda.metrics <- testAccuracy(pred.lda$class, "pca + LDA")
+
+lda.metrics
+```
+
+
+### Discriminant Score Distribution
+
+Looking at how well LD1 separates the two classes on the training
+data.
+
+```{r chunk16}
+lda.train.scores <- predict(fit.lda, train.pca)
+
+scores.0 <- lda.train.scores$x[train.y == "0"]
+scores.1 <- lda.train.scores$x[train.y == "1"]
+
+hist(scores.0, col = rgb(1, 0, 0, 0.4), xlim = range(lda.train.scores$x),
+     breaks = 15, main = "LDA Discriminant Scores by Class", xlab = "LD1")
+hist(scores.1, col = rgb(0, 0, 1, 0.4), breaks = 15, add = TRUE)
+legend("topright", legend = c("Normal (0)", "Cancer (1)"),
+       fill = c(rgb(1, 0, 0, 0.4), rgb(0, 0, 1, 0.4)))
+```
+
+### Posterior Probability Analysis
+
+LDA gives each test observation a posterior probability of being
+cancer. Points above the 0.5 line get classified as cancer.
+
+```{r chunk17}
+lda.test.post <- predict(fit.lda, test.pca)$posterior[, "1"]
+
+plot(lda.test.post, col = as.numeric(test.y) + 1, pch = 19,
+     ylab = "P(Cancer | X)", xlab = "Test Observation",
+     main = "LDA Posterior Probabilities")
+abline(h = 0.5, lty = 2)
+legend("topleft", legend = c("Normal (0)", "Cancer (1)"), col = c(2, 3), pch = 19)
+```
+
+### Threshold Analysis
+
+Lowering the threshold below 0.5 catches more cancer cases but also
+increases false positives.
+
+```{r chunk18}
+thresholds <- seq(0.1, 0.9, by = 0.05)
+thresh.sens <- rep(0, length(thresholds))
+thresh.spec <- rep(0, length(thresholds))
+
+for (j in 1:length(thresholds)) {
+  pred.t <- ifelse(lda.test.post > thresholds[j], "1", "0")
+  pred.t <- factor(pred.t, levels = c("0", "1"))
+  cm <- table(pred.t, test.y)
+  if (nrow(cm) == 2 && ncol(cm) == 2) {
+    thresh.sens[j] <- cm["1", "1"] / sum(cm[, "1"])
+    thresh.spec[j] <- cm["0", "0"] / sum(cm[, "0"])
+  }
+}
+
+plot(thresholds, thresh.sens, type = "l", col = "blue", lwd = 2,
+     ylim = c(0, 1), xlab = "Threshold", ylab = "Rate",
+     main = "LDA: Sensitivity vs Specificity by Threshold")
+lines(thresholds, thresh.spec, col = "red", lwd = 2)
+legend("right", legend = c("Sensitivity", "Specificity"),
+       col = c("blue", "red"), lwd = 2)
+```
+
+
+```{r Comparative}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+
+plot_model_stat <- function(data) {
+  df_long <- data %>%
+    pivot_longer(cols = -model, names_to = "metric", values_to = "value")
+
+  ggplot(df_long, aes(x = metric, y = value, fill = model)) +
+    geom_bar(stat = "identity", position = "dodge", color = "black", linewidth = 0.2) +
+
+    scale_fill_brewer(palette = "Set2") +
+    theme_minimal() +
+
+    labs(
+      title = "Comparative Model Performance Stat",
+     y = "Probability Score",
+      fill = "Model:  "
+    ) +
+     # Add a clean theme
+    theme(
+      legend.position = "bottom",
+      panel.grid.major.x = element_blank(),
+      panel.grid.major.y = element_blank()
+    )
+}
+
+plot_model_stat(model_stat)
+```
+
+
+
